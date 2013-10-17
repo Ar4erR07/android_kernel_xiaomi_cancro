@@ -54,6 +54,7 @@ obj-$(CONFIG_MAX8997_MUIC)	+= max8997-muic.o
 obj-$(CONFIG_WL127X_RFKILL)	+= wl127x-rfkill.o
 obj-$(CONFIG_SENSORS_AK8975)	+= akm8975.o
 obj-$(CONFIG_TSIF) += msm_tsif.o
+obj-$(CONFIG_HAPTIC_DRV2605)	+= drv2605.o
 msm_tsif-objs := tsif.o
 obj-$(CONFIG_TSIF_CHRDEV) += tsif_chrdev.o
 obj-$(CONFIG_TSPP) += tspp.o
