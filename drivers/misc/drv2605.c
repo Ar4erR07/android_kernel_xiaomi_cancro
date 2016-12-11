@@ -55,7 +55,7 @@
 #include <linux/timer.h>
 
 #include <linux/workqueue.h>
-#include <../../../drivers/staging/android/timed_output.h>
+//#include <../../../drivers/staging/android/timed_output.h>
 #include <linux/hrtimer.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
@@ -64,6 +64,7 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/regulator/consumer.h>
+#include <linux/input.h>
 
 /* Address of our device */
 #define DEVICE_ADDR 0x5A
@@ -123,7 +124,8 @@
 
 #define LRA_SEMCO1036                   0
 #define LRA_SEMCO0934                   1
-#define LRA_SELECTION                   LRA_SEMCO1036
+#define LRA_BLUECOM			2
+#define LRA_SELECTION			LRA_BLUECOM
 
 #if (LRA_SELECTION == LRA_SEMCO1036)
 #define LRA_RATED_VOLTAGE               0x56
@@ -136,6 +138,11 @@
 #define LRA_OVERDRIVE_CLAMP_VOLTAGE     0x72
 /* 100% of rated voltage (closed loop) */
 #define LRA_RTP_STRENGTH                0x7F
+
+#elif (LRA_SELECTION == LRA_BLUECOM)
+#define LRA_RATED_VOLTAGE		0x53
+#define LRA_OVERDRIVE_CLAMP_VOLTAGE	0xA4
+#define LRA_RTP_STRENGTH		0x7F 
 #endif
 
 #define SKIP_LRA_AUTOCAL        1
@@ -153,13 +160,13 @@
 #define REAL_TIME_PLAYBACK_STRENGTH 0x7F
 #endif
 
-#define MAX_VIBE_STRENGTH   REAL_TIME_PLAYBACK_STRENGTH
+#define MAX_VIBE_STRENGTH   0x7F
 #define MIN_VIBE_STRENGTH   0x20
-#define DEF_VIBE_STRENGTH   MAX_VIBE_STRENGTH
+#define DEF_VIBE_STRENGTH   0x7F
 
 #define MAX_TIMEOUT 15000	/* 15s */
 
-#define DEFAULT_EFFECT 14	/* Strong buzz 100% */
+#define DEFAULT_EFFECT 19	/* Strong buzz 100% */
 
 #define RTP_CLOSED_LOOP_ENABLE  /* Set closed loop mode for RTP */
 #define RTP_ERM_OVERDRIVE_CLAMP_VOLTAGE     0xF0
@@ -178,6 +185,11 @@ static struct drv260x {
 	unsigned char rated_voltage;
 	unsigned char overdrive_voltage;
 	struct regulator *vibrator_vdd;
+	struct work_struct work;
+	int level;
+	int vtg_min;
+	int vtg_max;
+	int vtg_level;
 } *drv260x;
 
 static struct vibrator {
@@ -194,8 +206,6 @@ static struct vibrator {
 
 static char g_effect_bank = EFFECT_LIBRARY;
 static int device_id = -1;
-
-static int vibe_strength = DEF_VIBE_STRENGTH;
 
 static unsigned char ERM_autocal_sequence[] = {
 	MODE_REG, AUTO_CALIBRATION,
@@ -318,79 +328,7 @@ static inline struct drv260x_platform_data
 	return NULL;
 }
 #endif
-static ssize_t drv260x_vib_min_show(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%d\n", MIN_VIBE_STRENGTH);
-}
 
-static ssize_t drv260x_vib_max_show(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%d\n", MAX_VIBE_STRENGTH);
-}
-
-static ssize_t drv260x_vib_level_default_show(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%d\n", DEF_VIBE_STRENGTH);
-}
-
-static ssize_t drv260x_vib_level_show(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%d\n", vibe_strength);
-}
-
-
-static ssize_t drv260x_vib_level_store(struct device *dev,
-		struct device_attribute *attr,
-		const char *buf, size_t count)
-{
-	int rc;
-	int val;
-
-	rc = kstrtoint(buf, 10, &val);
-	if (rc) {
-		pr_err("%s: error getting level\n", __func__);
-		return -EINVAL;
-	}
-
-	if (val < MIN_VIBE_STRENGTH) {
-		pr_err("%s: level %d not in range (%d - %d), using min.\n",
-				__func__, val, MIN_VIBE_STRENGTH, MAX_VIBE_STRENGTH);
-		val = MIN_VIBE_STRENGTH;
-	} else if (val > MAX_VIBE_STRENGTH) {
-		pr_err("%s: level %d not in range (%d - %d), using max.\n",
-				__func__, val, MIN_VIBE_STRENGTH, MAX_VIBE_STRENGTH);
-		val = MAX_VIBE_STRENGTH;
-	}
-
-	vibe_strength = val;
-
-	return strnlen(buf, count);
-}
-
-static DEVICE_ATTR(vtg_min, S_IRUGO, drv260x_vib_min_show, NULL);
-static DEVICE_ATTR(vtg_max, S_IRUGO, drv260x_vib_max_show, NULL);
-static DEVICE_ATTR(vtg_level_default, S_IRUGO, drv260x_vib_level_default_show, NULL);
-static DEVICE_ATTR(vtg_level, S_IRUGO | S_IWUSR, drv260x_vib_level_show, drv260x_vib_level_store);
-
-static struct attribute *timed_dev_attrs[] = {
-	&dev_attr_vtg_min.attr,
-	&dev_attr_vtg_max.attr,
-	&dev_attr_vtg_level_default.attr,
-	&dev_attr_vtg_level.attr,
-	NULL,
-};
-
-static struct attribute_group timed_dev_attr_group = {
-	.attrs = timed_dev_attrs,
-};
 
 static void drv260x_write_reg_val(const unsigned char *data, unsigned int size)
 {
@@ -471,6 +409,7 @@ static void drv260x_vreg_control(bool vdd_supply_enable)
 
 static void drv260x_change_mode(char mode)
 {
+	unsigned char wakeup[] = {MODE_REG, 0};
 	unsigned char tmp[] = {
 #ifdef RTP_CLOSED_LOOP_ENABLE
 		Control3_REG, NG_Thresh_2,
@@ -487,6 +426,7 @@ static void drv260x_change_mode(char mode)
 		tmp[3] = drv260x->overdrive_voltage;
 	}
 #endif
+	drv260x_write_reg_val(wakeup, sizeof(wakeup));
 	drv260x_write_reg_val(tmp, sizeof(tmp));
 }
 
@@ -517,15 +457,6 @@ static void setAudioHapticsEnabled(int enable);
 static int audio_haptics_enabled = NO;
 static int vibrator_is_playing = NO;
 
-static int vibrator_get_time(struct timed_output_dev *dev)
-{
-	if (hrtimer_active(&vibdata.timer)) {
-		ktime_t r = hrtimer_get_remaining(&vibdata.timer);
-		return ktime_to_ms(r);
-	}
-
-	return 0;
-}
 
 static void vibrator_off(void)
 {
@@ -549,7 +480,7 @@ static void vibrator_off(void)
 	wake_unlock(&vibdata.wklock);
 }
 
-static void vibrator_enable(struct timed_output_dev *dev, int value)
+static void vibrator_enable(struct drv260x *haptic, int enable)
 {
 	char mode;
 	if (drv260x->client == NULL)
@@ -558,7 +489,14 @@ static void vibrator_enable(struct timed_output_dev *dev, int value)
 	hrtimer_cancel(&vibdata.timer);
 	cancel_work_sync(&vibdata.work);
 
-	if (value) {
+	//if (haptic->level < MIN_VIBE_STRENGTH)
+	//	haptic->level = MIN_VIBE_STRENGTH;
+	//if (haptic->level > MAX_VIBE_STRENGTH)
+	//	haptic->level = MAX_VIBE_STRENGTH;
+
+	printk(KERN_ALERT "setting vibration to %d, scaled to %d\n", enable, haptic->level);
+
+	if (enable) {
 		wake_lock(&vibdata.wklock);
 
 		mode = drv260x_read_reg(MODE_REG) & DRV260X_MODE_MASK;
@@ -567,21 +505,21 @@ static void vibrator_enable(struct timed_output_dev *dev, int value)
 		if (mode != MODE_REAL_TIME_PLAYBACK) {
 			if (audio_haptics_enabled && mode == MODE_AUDIOHAPTIC)
 				setAudioHapticsEnabled(NO);
-			drv260x_set_rtp_val(vibe_strength);
+			drv260x_set_rtp_val(haptic->level);
 			drv260x_change_mode(MODE_REAL_TIME_PLAYBACK);
 			vibrator_is_playing = YES;
-		}
 
-		if (value > 0) {
-			if (value > MAX_TIMEOUT)
-				value = MAX_TIMEOUT;
-			hrtimer_start(&vibdata.timer,
-				      ns_to_ktime((u64) value * NSEC_PER_MSEC),
-				      HRTIMER_MODE_REL);
+		//}
+
+		//if (value > 0) {
+		//	if (value > MAX_TIMEOUT)
+		//		value = MAX_TIMEOUT;
+		//	hrtimer_start(&vibdata.timer,
+		//		      ns_to_ktime((u64) value * NSEC_PER_MSEC),
+		//		      HRTIMER_MODE_REL);
 		}
 	} else
 		vibrator_off();
-
 	mutex_unlock(&vibdata.lock);
 }
 
@@ -661,11 +599,6 @@ static void setAudioHapticsEnabled(int enable)
 	}
 }
 
-static struct timed_output_dev to_dev = {
-	.name = "vibrator",
-	.get_time = vibrator_get_time,
-	.enable = vibrator_enable,
-};
 static void drv260x_update_init_sequence(unsigned char *seq, int size,
 					unsigned char reg, unsigned char data)
 {
@@ -679,9 +612,45 @@ static void drv260x_update_init_sequence(unsigned char *seq, int size,
 static void drv260x_exit(void);
 static void probe_work(struct work_struct *work);
 
+
+static void drv260x_worker(struct work_struct *work)
+{
+	struct drv260x *haptic;
+
+	haptic = container_of(work, struct drv260x, work);
+	vibrator_enable(haptic, !!haptic->level);
+}
+
+static void drv260x_haptic_close(struct input_dev *dev)
+{
+	struct drv260x *haptic = input_get_drvdata(dev);
+
+	cancel_work_sync(&haptic->work);
+
+	vibrator_off();
+}
+
+static int drv260x_haptic_play_effect(struct input_dev *dev, void *data,
+				struct ff_effect *effect)
+{
+	struct drv260x *haptic = input_get_drvdata(dev);
+
+	haptic->level = effect->u.rumble.strong_magnitude  >> 8;
+	if (!haptic->level)
+		haptic->level = effect->u.rumble.weak_magnitude  >> 9;
+
+	schedule_work(&haptic->work);
+	return 0;
+}
+
 static int drv260x_probe(struct i2c_client *client,
 			 const struct i2c_device_id *id)
 {
+
+	struct drv260x *haptic;
+	struct input_dev *input_dev;
+	int error;
+
 	struct drv260x_platform_data *pdata = NULL;
 
 	if (client->dev.of_node)
@@ -736,8 +705,51 @@ static int drv260x_probe(struct i2c_client *client,
 		g_effect_bank = pdata->effects_library;
 
 	INIT_WORK(&vibdata.work_probe, probe_work);
+
+
+	haptic = kzalloc(sizeof(struct drv260x), GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (!haptic || !input_dev) {
+		dev_err(&client->dev, "unable to allocate memory\n");
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
+
+
+	input_dev->name = "drv260x-haptic";
+	input_dev->id.version = 1;
+	input_dev->dev.parent = &client->dev;
+	input_dev->close = drv260x_haptic_close;
+	input_set_drvdata(input_dev, haptic);
+	input_set_capability(input_dev, EV_FF, FF_RUMBLE);
+
+	error = input_ff_create_memless(input_dev, NULL,
+				drv260x_haptic_play_effect);
+	if (error) {
+		dev_err(&client->dev,
+			"unable to create FF device, error: %d\n",
+			error);
+		goto err_free_mem;
+	}
+
+	error = input_register_device(input_dev);
+	if (error) {
+		dev_err(&client->dev,
+			"unable to register input device, error: %d\n",
+			error);
+		goto err_destroy_ff;
+	}
 	schedule_work(&vibdata.work_probe);
+	INIT_WORK(&haptic->work, drv260x_worker);
 	return 0;
+
+err_destroy_ff:
+	input_ff_destroy(input_dev);
+err_free_mem:
+	input_free_device(input_dev);
+	kfree(haptic);
+
+	return error;
 }
 
 static void probe_work(struct work_struct *work)
@@ -845,16 +857,6 @@ static void probe_work(struct work_struct *work)
 	/* Put hardware in standby */
 	drv260x_standby();
 
-	if (timed_output_dev_register(&to_dev) < 0) {
-		printk(KERN_ALERT "drv260x: fail to create timed output dev\n");
-		drv260x_exit();
-		/* return -ENODEV; */
-		return;
-	}
-
-	if (sysfs_create_group(&to_dev.dev->kobj, &timed_dev_attr_group)) {
-		printk(KERN_ALERT "drv260x: fail to create strength tunables\n");
-	}
 
 	printk(KERN_ALERT "drv260x probe work succeeded");
 	return;
@@ -948,7 +950,7 @@ static ssize_t drv260x_write(struct file *filp, const char *buff, size_t len,
 					    && mode == MODE_AUDIOHAPTIC)
 						setAudioHapticsEnabled(NO);
 					drv260x_set_rtp_val
-					    (vibe_strength);
+					    (drv260x->level);
 					drv260x_change_mode
 					    (MODE_REAL_TIME_PLAYBACK);
 					vibrator_is_playing = YES;

@@ -325,14 +325,15 @@
 #define AUDIO_HAPTICS_MIN_OUTPUT_VOLTAGE    0x19
 #define AUDIO_HAPTICS_MAX_OUTPUT_VOLTAGE    0xFF
 
-#define DEFAULT_ERM_AUTOCAL_COMPENSATION    0x14
-#define DEFAULT_ERM_AUTOCAL_BACKEMF         0x72
+#define DEFAULT_ERM_AUTOCAL_COMPENSATION    0x04
+#define DEFAULT_ERM_AUTOCAL_BACKEMF         0xA7
 
 #define DEFAULT_LRA_AUTOCAL_COMPENSATION    0x06
 #define DEFAULT_LRA_AUTOCAL_BACKEMF         0xDE
 
 #ifdef __KERNEL__
 struct drv260x_platform_data {
+        const char *name;
 	int en_gpio;
 	int trigger_gpio;
 	int external_trigger;
