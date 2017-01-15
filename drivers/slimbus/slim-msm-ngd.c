@@ -1174,7 +1174,7 @@ static int ngd_slim_rx_msgq_thread(void *data)
 
 	while (!kthread_should_stop()) {
 		set_current_state(TASK_INTERRUPTIBLE);
-		wait_for_completion(notify);
+		wait_for_completion_interruptible(notify);
 		/* 1 irq notification per message */
 		if (dev->use_rx_msgqs != MSM_MSGQ_ENABLED) {
 			msm_slim_rx_dequeue(dev, (u8 *)buffer);
@@ -1211,7 +1211,6 @@ static int ngd_notify_slaves(void *data)
 	struct list_head *pos, *next;
 	int ret, i = 0;
 	ret = qmi_svc_event_notifier_register(SLIMBUS_QMI_SVC_ID,
-				SLIMBUS_QMI_SVC_V1,
 				SLIMBUS_QMI_INS_ID, &dev->qmi.nb);
 	if (ret) {
 		pr_err("Slimbus QMI service registration failed:%d", ret);
@@ -1220,8 +1219,9 @@ static int ngd_notify_slaves(void *data)
 
 	while (!kthread_should_stop()) {
 		set_current_state(TASK_INTERRUPTIBLE);
-		wait_for_completion(&dev->qmi.slave_notify);
+		wait_for_completion_interruptible(&dev->qmi.slave_notify);
 		/* Probe devices for first notification */
+
 		if (!i) {
 			i++;
 			dev->err = 0;
@@ -1355,7 +1355,7 @@ static int __devinit ngd_slim_probe(struct platform_device *pdev)
 
 	/* Create IPC log context */
 	dev->ipc_slimbus_log = ipc_log_context_create(IPC_SLIMBUS_LOG_PAGES,
-						dev_name(dev->dev), 0);
+						dev_name(dev->dev),0);
 	if (!dev->ipc_slimbus_log)
 		dev_err(&pdev->dev, "error creating ipc_logging context\n");
 	else {
@@ -1545,7 +1545,6 @@ static int __devexit ngd_slim_remove(struct platform_device *pdev)
 		sysfs_remove_file(&dev->dev->kobj,
 				&dev_attr_debug_mask.attr);
 	qmi_svc_event_notifier_unregister(SLIMBUS_QMI_SVC_ID,
-				SLIMBUS_QMI_SVC_V1,
 				SLIMBUS_QMI_INS_ID, &dev->qmi.nb);
 	pm_runtime_disable(&pdev->dev);
 	if (!IS_ERR_OR_NULL(dev->dsp.ssr))
